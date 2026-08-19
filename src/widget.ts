@@ -45,6 +45,7 @@ export class Widget extends Base {
 	protected readonly $addImage!: HTMLButtonElement;
 	protected readonly $strategy!: HTMLInputElement;
 	protected readonly $drawDelay!: HTMLInputElement;
+	protected readonly $showRegions!: HTMLInputElement;
 	protected readonly $progressLine!: HTMLDivElement;
 	protected readonly $progressText!: HTMLSpanElement;
 	protected readonly $images!: HTMLDivElement;
@@ -69,6 +70,7 @@ export class Widget extends Base {
 			$addImage: '.add-image',
 			$strategy: '.strategy',
 			$drawDelay: '.draw-delay',
+			$showRegions: '.show-regions',
 			$progressLine: '.wprogress div',
 			$progressText: '.wprogress span',
 			$images: '.images',
@@ -87,6 +89,11 @@ export class Widget extends Base {
 		this.$drawDelay.addEventListener('change', () => {
 			this.bot.drawDelay = Math.max(0, this.$drawDelay.valueAsNumber || 0);
 			this.$drawDelay.valueAsNumber = this.bot.drawDelay;
+			save(this.bot);
+		});
+		this.$showRegions.addEventListener('change', () => {
+			this.bot.showRegions = this.$showRegions.checked;
+			this.bot.regions?.update();
 			save(this.bot);
 		});
 
@@ -182,6 +189,7 @@ export class Widget extends Base {
 		if (!this.$title.querySelector('input')) this.$title.textContent = this.bot.name;
 		this.$strategy.value = this.bot.strategy;
 		if (document.activeElement !== this.$drawDelay) this.$drawDelay.valueAsNumber = this.bot.drawDelay;
+		this.$showRegions.checked = this.bot.showRegions;
 		// Progress
 		let maxTasks = 0;
 		let totalTasks = 0;

@@ -2,6 +2,7 @@ import { wait } from '@softsky/utils';
 
 import { BotImage, DrawTask } from './image';
 import { Pixels } from './pixels';
+import { RegionGrid } from './regions';
 import { loadSave } from './save';
 // @ts-ignore
 import css from './style.css' with { type: 'text' };
@@ -85,6 +86,12 @@ export class WPlaceBot {
 	/** Strategy how to distribute draw calls between images */
 	public strategy = BotStrategy.SEQUENTIAL;
 
+	/** Draw wplace region borders on the map */
+	public showRegions = false;
+
+	/** Region border overlay. Created once the map is ready */
+	public regions?: RegionGrid;
+
 	/** Widget display name */
 	public name = 'WPlace-bot';
 
@@ -139,6 +146,7 @@ export class WPlaceBot {
 			this.strategy = save.strategy;
 			this.name = save.name ?? 'WPlace-bot';
 			this.drawDelay = save.drawDelay ?? 0;
+			this.showRegions = save.showRegions ?? false;
 		}
 
 		const style = document.createElement('style');
@@ -162,6 +170,7 @@ export class WPlaceBot {
 						break;
 					}
 				this.updateImages();
+				this.regions?.update();
 			}).observe($canvasContainer, {
 				attributes: true,
 				childList: true,
@@ -169,6 +178,7 @@ export class WPlaceBot {
 			});
 
 			this.updateStars();
+			this.regions = new RegionGrid(this);
 
 			await wait(500);
 			await this.updateColors();
@@ -316,6 +326,7 @@ export class WPlaceBot {
 			images: this.images.map((x) => x.toJSON()),
 			strategy: this.strategy,
 			drawDelay: this.drawDelay,
+			showRegions: this.showRegions,
 		};
 	}
 

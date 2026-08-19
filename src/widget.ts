@@ -44,6 +44,7 @@ export class Widget extends Base {
 	protected readonly $draw!: HTMLButtonElement;
 	protected readonly $addImage!: HTMLButtonElement;
 	protected readonly $strategy!: HTMLInputElement;
+	protected readonly $drawDelay!: HTMLInputElement;
 	protected readonly $progressLine!: HTMLDivElement;
 	protected readonly $progressText!: HTMLSpanElement;
 	protected readonly $images!: HTMLDivElement;
@@ -67,6 +68,7 @@ export class Widget extends Base {
 			$draw: '.draw',
 			$addImage: '.add-image',
 			$strategy: '.strategy',
+			$drawDelay: '.draw-delay',
 			$progressLine: '.wprogress div',
 			$progressText: '.wprogress span',
 			$images: '.images',
@@ -80,6 +82,12 @@ export class Widget extends Base {
 		this.$addImage.addEventListener('click', () => this.addImage());
 		this.$strategy.addEventListener('change', () => {
 			this.bot.strategy = this.$strategy.value as BotStrategy;
+			save(this.bot);
+		});
+		this.$drawDelay.addEventListener('change', () => {
+			this.bot.drawDelay = Math.max(0, this.$drawDelay.valueAsNumber || 0);
+			this.$drawDelay.valueAsNumber = this.bot.drawDelay;
+			save(this.bot);
 		});
 
 		this.setupTitleEditing();
@@ -173,6 +181,7 @@ export class Widget extends Base {
 	public update() {
 		if (!this.$title.querySelector('input')) this.$title.textContent = this.bot.name;
 		this.$strategy.value = this.bot.strategy;
+		if (document.activeElement !== this.$drawDelay) this.$drawDelay.valueAsNumber = this.bot.drawDelay;
 		// Progress
 		let maxTasks = 0;
 		let totalTasks = 0;

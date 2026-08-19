@@ -109,8 +109,7 @@ export class WorldPosition {
 	/** Pixel size around with world position. Calculated on every read */
 	public get pixelSize() {
 		return (
-			(extractScreenPositionFromStar(this.bot.$stars[this.anchor2Index]!).x -
-				extractScreenPositionFromStar(this.bot.$stars[this.anchor1Index]!).x) /
+			(this.bot.readStarPosition(this.anchor2Index).x - this.bot.readStarPosition(this.anchor1Index).x) /
 			(FAVORITE_LOCATIONS_POSITIONS[this.anchor2Index]!.x - FAVORITE_LOCATIONS_POSITIONS[this.anchor1Index]!.x)
 		);
 	}
@@ -159,7 +158,7 @@ export class WorldPosition {
 	/** Get screen position */
 	public toScreenPosition(): Position {
 		const worldPosition = FAVORITE_LOCATIONS_POSITIONS[this.anchor1Index]!;
-		const screenPosition = extractScreenPositionFromStar(this.bot.$stars[this.anchor1Index]!);
+		const screenPosition = this.bot.readStarPosition(this.anchor1Index);
 		return {
 			x: (this.globalX - worldPosition.x) * this.pixelSize + screenPosition.x,
 			y: (this.globalY - worldPosition.y) * this.pixelSize + screenPosition.y,

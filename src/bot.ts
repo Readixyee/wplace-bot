@@ -15,6 +15,22 @@ import {
 	WorldPosition,
 } from './world-position';
 
+/**
+ * Yield to the browser without setTimeout's clamping.
+ * Nested setTimeout(1) gets pinned to ~4ms by every major browser, which caps
+ * drawing at ~250px/s. A MessageChannel round trip is a real task boundary
+ * (the page still gets to run its handlers) but costs well under a millisecond.
+ */
+const yieldChannel = new MessageChannel();
+const yieldResolvers: (() => void)[] = [];
+yieldChannel.port1.onmessage = () => yieldResolvers.shift()?.();
+function yieldToBrowser() {
+	return new Promise<void>((resolve) => {
+		yieldResolvers.push(resolve);
+		yieldChannel.port2.postMessage(undefined);
+	});
+}
+
 export type Me = {
 	allianceId: number;
 	allianceRole: string;
@@ -72,6 +88,13 @@ export class WPlaceBot {
 	/** Widget display name */
 	public name = 'WPlace-bot';
 
+	/**
+	 * Milliseconds to pause between pixels.
+	 * 0 draws as fast as the browser allows. Raise it if wplace starts
+	 * dropping pixels.
+	 */
+	public drawDelay = 0;
+
 	/** Images on canvas */
 	public images: BotImage[] = [];
 
@@ -82,6 +105,15 @@ export class WPlaceBot {
 
 	/** Last color drawn */
 	protected lastColor?: number;
+
+	/**
+	 * Star screen positions cached for the duration of one draw tick.
+	 * Only populated while drawing, so dragging images stays live.
+	 */
+	protected starCache: (Position | undefined)[] | null = null;
+
+	/** Color buttons by color index, so we don't hit getElementById per pixel */
+	protected colorButtons = new Map<number, HTMLButtonElement>();
 
 	public constructor() {
 		// NEEDS TO RUN FIRST TO MAKE SURE THE /me IS INTERCEPTED
@@ -106,6 +138,7 @@ export class WPlaceBot {
 			}
 			this.strategy = save.strategy;
 			this.name = save.name ?? 'WPlace-bot';
+			this.drawDelay = save.drawDelay ?? 0;
 		}
 
 		const style = document.createElement('style');
@@ -202,6 +235,10 @@ export class WPlaceBot {
 				globalThis.addEventListener('mousemove', prevent, true);
 				$canvas.addEventListener('wheel', prevent, true);
 
+				// Map is pinned for the rest of the run, so star positions can be
+				// cached between ticks instead of re-parsed for every pixel.
+				this.starCache = [];
+
 				const res = await fetch('https://backend.wplace.live/me', {
 					credentials: 'include',
 				});
@@ -222,7 +259,7 @@ export class WPlaceBot {
 								if (!task) continue;
 								this.drawTask(task);
 								charges -= 1;
-								await wait(1);
+								await this.tick();
 								end = false;
 							}
 							if (end) break;
@@ -245,7 +282,7 @@ export class WPlaceBot {
 							}
 							this.drawTask(minImage.tasks.shift()!);
 							charges -= 1;
-							await wait(1);
+							await this.tick();
 						}
 						break;
 					}
@@ -255,7 +292,7 @@ export class WPlaceBot {
 							for (let task = image.tasks.shift(); task && charges > 0; task = image.tasks.shift()) {
 								this.drawTask(task);
 								charges -= 1;
-								await wait(1);
+								await this.tick();
 							}
 						}
 					}
@@ -265,6 +302,7 @@ export class WPlaceBot {
 			() => {
 				globalThis.removeEventListener('mousemove', prevent, true);
 				$canvas.removeEventListener('wheel', prevent, true);
+				this.starCache = null;
 				this.widget.setDisabled('draw', false);
 			}
 		);
@@ -277,7 +315,24 @@ export class WPlaceBot {
 			name: this.name,
 			images: this.images.map((x) => x.toJSON()),
 			strategy: this.strategy,
+			drawDelay: this.drawDelay,
 		};
+	}
+
+	/**
+	 * Read a star's screen position, going through the draw cache when it's active.
+	 * Parsing the transform string is cheap but we do it 5x per pixel, so caching
+	 * it for the span of one tick is free speed.
+	 */
+	public readStarPosition(index: number): Position {
+		if (!this.starCache) return extractScreenPositionFromStar(this.$stars[index]!);
+		return (this.starCache[index] ??= extractScreenPositionFromStar(this.$stars[index]!));
+	}
+
+	/** Hand control back to the page between pixels */
+	protected tick() {
+		if (this.starCache) this.starCache.length = 0;
+		return this.drawDelay > 0 ? wait(this.drawDelay) : yieldToBrowser();
 	}
 
 	/** Read colors */
@@ -466,6 +521,7 @@ export class WPlaceBot {
 	/** Opens colors and makes them visible for selection */
 	protected async openColors() {
 		this.lastColor = undefined;
+		this.colorButtons.clear();
 		// Click close marker
 		document.querySelector<HTMLButtonElement>('.flex.gap-2.px-3 > .btn-circle')?.click();
 		await wait(1);
@@ -486,7 +542,14 @@ export class WPlaceBot {
 	/** Draw one task */
 	protected drawTask(task: DrawTask) {
 		if (this.lastColor !== task.color) {
-			(document.getElementById('color-' + task.color) as HTMLButtonElement).click();
+			// Re-query if the button was never seen or wplace re-rendered it away —
+			// clicking a detached node would silently paint the wrong color.
+			let $color = this.colorButtons.get(task.color);
+			if (!$color?.isConnected) {
+				$color = document.getElementById('color-' + task.color) as HTMLButtonElement;
+				this.colorButtons.set(task.color, $color);
+			}
+			$color.click();
 			this.lastColor = task.color;
 		}
 		const halfPixel = task.position.pixelSize / 2;

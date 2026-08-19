@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         wplace-bot fixed
 // @namespace    https://github.com/Readixyee
-// @version      1.7.3
+// @version      1.8
 // @description  Bot to automate painting on website https://wplace.live
 // @author       Readixyee, SoundOfTheSky
 // @license      MPL-2.0
@@ -875,7 +875,7 @@ class WorldPosition {
   anchor1Index;
   anchor2Index;
   get pixelSize() {
-    return (extractScreenPositionFromStar(this.bot.$stars[this.anchor2Index]).x - extractScreenPositionFromStar(this.bot.$stars[this.anchor1Index]).x) / (FAVORITE_LOCATIONS_POSITIONS[this.anchor2Index].x - FAVORITE_LOCATIONS_POSITIONS[this.anchor1Index].x);
+    return (this.bot.readStarPosition(this.anchor2Index).x - this.bot.readStarPosition(this.anchor1Index).x) / (FAVORITE_LOCATIONS_POSITIONS[this.anchor2Index].x - FAVORITE_LOCATIONS_POSITIONS[this.anchor1Index].x);
   }
   constructor(bot, tileorGlobalX, tileorGlobalY, x, y) {
     this.bot = bot;
@@ -912,7 +912,7 @@ class WorldPosition {
   }
   toScreenPosition() {
     const worldPosition = FAVORITE_LOCATIONS_POSITIONS[this.anchor1Index];
-    const screenPosition = extractScreenPositionFromStar(this.bot.$stars[this.anchor1Index]);
+    const screenPosition = this.bot.readStarPosition(this.anchor1Index);
     return {
       x: (this.globalX - worldPosition.x) * this.pixelSize + screenPosition.x,
       y: (this.globalY - worldPosition.y) * this.pixelSize + screenPosition.y
@@ -2354,6 +2354,9 @@ var widget_default = `<button class="wopen-button"><div>></div></button>
 			<option value="PERCENTAGE">Percentage</option>
 		</select></label
 	>
+	<label title="Milliseconds to pause between pixels. 0 draws as fast as the browser allows. Raise it if wplace starts dropping pixels."
+		>Delay:&nbsp;<input class="draw-delay" type="number" min="0" step="1" /></label
+	>
 	<div class="images"></div>
 	<!-- <button class="pumpkin-hunt" disabled>Pumpkin Hunt!</button> -->
 	<button class="add-image" disabled>Add image</button>
@@ -2387,6 +2390,7 @@ class Widget extends Base2 {
   $draw;
   $addImage;
   $strategy;
+  $drawDelay;
   $progressLine;
   $progressText;
   $images;
@@ -2407,6 +2411,7 @@ class Widget extends Base2 {
       $draw: ".draw",
       $addImage: ".add-image",
       $strategy: ".strategy",
+      $drawDelay: ".draw-delay",
       $progressLine: ".wprogress div",
       $progressText: ".wprogress span",
       $images: ".images"
@@ -2416,6 +2421,12 @@ class Widget extends Base2 {
     this.$addImage.addEventListener("click", () => this.addImage());
     this.$strategy.addEventListener("change", () => {
       this.bot.strategy = this.$strategy.value;
+      save(this.bot);
+    });
+    this.$drawDelay.addEventListener("change", () => {
+      this.bot.drawDelay = Math.max(0, this.$drawDelay.valueAsNumber || 0);
+      this.$drawDelay.valueAsNumber = this.bot.drawDelay;
+      save(this.bot);
     });
     this.setupTitleEditing();
     this.update();
@@ -2486,6 +2497,8 @@ class Widget extends Base2 {
     if (!this.$title.querySelector("input"))
       this.$title.textContent = this.bot.name;
     this.$strategy.value = this.bot.strategy;
+    if (document.activeElement !== this.$drawDelay)
+      this.$drawDelay.valueAsNumber = this.bot.drawDelay;
     let maxTasks = 0;
     let totalTasks = 0;
     for (let index = 0;index < this.bot.images.length; index++) {
@@ -2590,6 +2603,15 @@ class Widget extends Base2 {
 }
 
 // src/bot.ts
+var yieldChannel = new MessageChannel;
+var yieldResolvers = [];
+yieldChannel.port1.onmessage = () => yieldResolvers.shift()?.();
+function yieldToBrowser() {
+  return new Promise((resolve) => {
+    yieldResolvers.push(resolve);
+    yieldChannel.port2.postMessage(undefined);
+  });
+}
 var SAVE_VERSION = 2;
 
 class WPlaceBot {
@@ -2599,10 +2621,13 @@ class WPlaceBot {
   $stars = [];
   strategy = "SEQUENTIAL" /* SEQUENTIAL */;
   name = "WPlace-bot";
+  drawDelay = 0;
   images = [];
   widget = new Widget(this);
   markerPixelPositionResolvers = [];
   lastColor;
+  starCache = null;
+  colorButtons = new Map;
   constructor() {
     this.registerFetchInterceptor();
     this.bootstrap();
@@ -2623,6 +2648,7 @@ class WPlaceBot {
       }
       this.strategy = save2.strategy;
       this.name = save2.name ?? "WPlace-bot";
+      this.drawDelay = save2.drawDelay ?? 0;
     }
     const style = document.createElement("style");
     style.textContent = style_default.replace("FAKE_FAVORITE_LOCATIONS", FAVORITE_LOCATIONS.length.toString());
@@ -2696,6 +2722,7 @@ class WPlaceBot {
       }
       globalThis.addEventListener("mousemove", prevent, true);
       $canvas.addEventListener("wheel", prevent, true);
+      this.starCache = [];
       const res = await fetch("https://backend.wplace.live/me", {
         credentials: "include"
       });
@@ -2715,7 +2742,7 @@ class WPlaceBot {
                 continue;
               this.drawTask(task);
               charges -= 1;
-              await wait(1);
+              await this.tick();
               end = false;
             }
             if (end)
@@ -2737,7 +2764,7 @@ class WPlaceBot {
             }
             this.drawTask(minImage.tasks.shift());
             charges -= 1;
-            await wait(1);
+            await this.tick();
           }
           break;
         }
@@ -2747,7 +2774,7 @@ class WPlaceBot {
             for (let task = image.tasks.shift();task && charges > 0; task = image.tasks.shift()) {
               this.drawTask(task);
               charges -= 1;
-              await wait(1);
+              await this.tick();
             }
           }
         }
@@ -2756,6 +2783,7 @@ class WPlaceBot {
     }, () => {
       globalThis.removeEventListener("mousemove", prevent, true);
       $canvas.removeEventListener("wheel", prevent, true);
+      this.starCache = null;
       this.widget.setDisabled("draw", false);
     });
   }
@@ -2764,8 +2792,19 @@ class WPlaceBot {
       version: SAVE_VERSION,
       name: this.name,
       images: this.images.map((x) => x.toJSON()),
-      strategy: this.strategy
+      strategy: this.strategy,
+      drawDelay: this.drawDelay
     };
+  }
+  readStarPosition(index) {
+    if (!this.starCache)
+      return extractScreenPositionFromStar(this.$stars[index]);
+    return this.starCache[index] ??= extractScreenPositionFromStar(this.$stars[index]);
+  }
+  tick() {
+    if (this.starCache)
+      this.starCache.length = 0;
+    return this.drawDelay > 0 ? wait(this.drawDelay) : yieldToBrowser();
   }
   async updateColors() {
     await this.openColors();
@@ -2912,6 +2951,7 @@ class WPlaceBot {
   }
   async openColors() {
     this.lastColor = undefined;
+    this.colorButtons.clear();
     document.querySelector(".flex.gap-2.px-3 > .btn-circle")?.click();
     await wait(1);
     document.querySelector(".btn.btn-primary.btn-lg.relative.z-30")?.click();
@@ -2924,7 +2964,12 @@ class WPlaceBot {
   }
   drawTask(task) {
     if (this.lastColor !== task.color) {
-      document.getElementById("color-" + task.color).click();
+      let $color = this.colorButtons.get(task.color);
+      if (!$color?.isConnected) {
+        $color = document.getElementById("color-" + task.color);
+        this.colorButtons.set(task.color, $color);
+      }
+      $color.click();
       this.lastColor = task.color;
     }
     const halfPixel = task.position.pixelSize / 2;

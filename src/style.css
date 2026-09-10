@@ -350,6 +350,44 @@
 	z-index: 2;
 }
 
+/* Selection resize handles */
+.selection-resize {
+	position: absolute;
+	pointer-events: auto;
+}
+
+.selection-resize.n {
+	top: calc(var(--resize) / -2);
+	left: 0;
+	width: 100%;
+	height: var(--resize);
+	cursor: n-resize;
+}
+
+.selection-resize.e {
+	top: 0;
+	right: calc(var(--resize) / -2);
+	width: var(--resize);
+	height: 100%;
+	cursor: e-resize;
+}
+
+.selection-resize.s {
+	bottom: calc(var(--resize) / -2);
+	left: 0;
+	width: 100%;
+	height: var(--resize);
+	cursor: s-resize;
+}
+
+.selection-resize.w {
+	top: 0;
+	left: calc(var(--resize) / -2);
+	width: var(--resize);
+	height: 100%;
+	cursor: w-resize;
+}
+
 /* Resize */
 .resize {
 	position: absolute;

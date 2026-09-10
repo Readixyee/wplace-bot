@@ -67,6 +67,14 @@ export class BotImage extends Base {
 	public selection: { x: number; y: number; width: number; height: number } | null = null;
 	protected selectStart: { clientX: number; clientY: number } | null = null;
 
+	/** Dragging one of the selection's own resize handles */
+	protected selectionResizeInfo?: {
+		dir: string;
+		clientX: number;
+		clientY: number;
+		selection: { x: number; y: number; width: number; height: number };
+	};
+
 	protected readonly $brightness!: HTMLInputElement;
 	protected readonly $canvas!: HTMLCanvasElement;
 	protected readonly $closePopup!: HTMLButtonElement;
@@ -425,6 +433,12 @@ export class BotImage extends Base {
 			},
 			{ passive: false, capture: true }
 		);
+
+		// Resize an existing selection by dragging its edge handles
+		for (const $handle of this.$selectionRect.querySelectorAll<HTMLDivElement>('.selection-resize'))
+			this.registerEvent($handle, 'mousedown', this.selectionResizeStart.bind(this));
+		this.registerEvent(document, 'mousemove', this.selectionResize.bind(this));
+		this.registerEvent(document, 'mouseup', () => this.selectionResizeStop());
 
 		// Move
 		this.registerEvent(this.$topbar, 'mousedown', this.moveStart.bind(this));
@@ -970,6 +984,59 @@ export class BotImage extends Base {
 		if ($resize.classList.contains('w')) {
 			this.moveInfo.width = this.pixels.width;
 			this.moveInfo.globalX = this.position.globalX;
+		}
+	}
+
+	/** Start dragging one of the selection's own resize handles */
+	protected selectionResizeStart(event: MouseEvent) {
+		// Note: not gated on this.lock — lock only guards moving/resizing the
+		// image itself, not adjusting which part of it is marked to draw.
+		if (!this.selection || event.button !== 0) return;
+		event.preventDefault();
+		event.stopPropagation();
+		const $handle = event.currentTarget as HTMLDivElement;
+		this.selectionResizeInfo = {
+			dir: $handle.classList[1]!,
+			clientX: event.clientX,
+			clientY: event.clientY,
+			selection: { ...this.selection },
+		};
+	}
+
+	/** Resize the selection while a handle is being dragged */
+	protected selectionResize(event: MouseEvent) {
+		if (!this.selectionResizeInfo) return;
+		const { dir, clientX, clientY, selection } = this.selectionResizeInfo;
+		const pixelSize = this.position.pixelSize;
+		const deltaX = Math.round((event.clientX - clientX) / pixelSize);
+		const deltaY = Math.round((event.clientY - clientY) / pixelSize);
+		const imgW = this.pixels.pixels[0]!.length;
+		const imgH = this.pixels.pixels.length;
+
+		let { x, y, width, height } = selection;
+
+		if (dir.includes('e')) width = Math.min(imgW - selection.x, Math.max(1, selection.width + deltaX));
+		if (dir.includes('s')) height = Math.min(imgH - selection.y, Math.max(1, selection.height + deltaY));
+		if (dir.includes('w')) {
+			const newX = Math.min(selection.x + selection.width - 1, Math.max(0, selection.x + deltaX));
+			width = selection.x + selection.width - newX;
+			x = newX;
+		}
+		if (dir.includes('n')) {
+			const newY = Math.min(selection.y + selection.height - 1, Math.max(0, selection.y + deltaY));
+			height = selection.y + selection.height - newY;
+			y = newY;
+		}
+
+		this.selection = { x, y, width, height };
+		this.update();
+	}
+
+	/** Finish dragging a selection resize handle */
+	protected selectionResizeStop() {
+		if (this.selectionResizeInfo) {
+			this.selectionResizeInfo = undefined;
+			save(this.bot);
 		}
 	}
 

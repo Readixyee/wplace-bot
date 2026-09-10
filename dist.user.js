@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         wplace-bot fixed
 // @namespace    https://github.com/Readixyee
-// @version      1.8
+// @version      1.8.1
 // @description  Bot to automate painting on website https://wplace.live
 // @author       Readixyee, SoundOfTheSky
 // @license      MPL-2.0
@@ -155,27 +155,6 @@ class SpeedCalculator {
     return { time, historyTime };
   }
 }
-// src/base.ts
-class Base2 {
-  runOnDestroy = [];
-  destroy() {
-    for (let index = 0;index < this.runOnDestroy.length; index++)
-      this.runOnDestroy[index]();
-  }
-  populateElementsWithSelector(element, selectors) {
-    for (const key in selectors) {
-      this[key] = element.querySelector(selectors[key]);
-    }
-  }
-  registerEvent(target, type, listener, options = {}) {
-    options.passive ??= true;
-    target.addEventListener(type, listener, options);
-    this.runOnDestroy.push(() => {
-      target.removeEventListener(type, listener);
-    });
-  }
-}
-
 // src/colors.ts
 function srgbNonlinearTransformInv(c) {
   return c > 0.04045 ? ((c + 0.055) / 1.055) ** 2.4 : c / 12.92;
@@ -440,6 +419,42 @@ var COLOR_NAMES = [
   "Light Stone"
 ];
 
+// src/errors.ts
+class WPlaceBotError extends Error {
+  name = "WPlaceBotError";
+  constructor(message, bot) {
+    super(message);
+    bot.widget.status = message;
+  }
+}
+class NoImageError extends WPlaceBotError {
+  name = "NoImageError";
+  constructor(bot) {
+    super("❌ No image is selected", bot);
+  }
+}
+
+// src/base.ts
+class Base2 {
+  runOnDestroy = [];
+  destroy() {
+    for (let index = 0;index < this.runOnDestroy.length; index++)
+      this.runOnDestroy[index]();
+  }
+  populateElementsWithSelector(element, selectors) {
+    for (const key in selectors) {
+      this[key] = element.querySelector(selectors[key]);
+    }
+  }
+  registerEvent(target, type, listener, options = {}) {
+    options.passive ??= true;
+    target.addEventListener(type, listener, options);
+    this.runOnDestroy.push(() => {
+      target.removeEventListener(type, listener);
+    });
+  }
+}
+
 // src/image.html
 var image_default = `<div class="wtopbar">
 	<button class="export">📤</button>
@@ -453,7 +468,12 @@ var image_default = `<div class="wtopbar">
 	<div class="resize e"></div>
 	<div class="resize s"></div>
 	<div class="resize w"></div>
-	<div class="selection-rect"></div>
+	<div class="selection-rect">
+		<div class="selection-resize n"></div>
+		<div class="selection-resize e"></div>
+		<div class="selection-resize s"></div>
+		<div class="selection-resize w"></div>
+	</div>
 </div>
 
 <div class="wform popup">
@@ -959,6 +979,7 @@ class BotImage extends Base2 {
   moveInfo;
   selection = null;
   selectStart = null;
+  selectionResizeInfo;
   $brightness;
   $canvas;
   $closePopup;
@@ -1246,6 +1267,10 @@ class BotImage extends Base2 {
         e.stopPropagation();
       }
     }, { passive: false, capture: true });
+    for (const $handle of this.$selectionRect.querySelectorAll(".selection-resize"))
+      this.registerEvent($handle, "mousedown", this.selectionResizeStart.bind(this));
+    this.registerEvent(document, "mousemove", this.selectionResize.bind(this));
+    this.registerEvent(document, "mouseup", () => this.selectionResizeStop());
     this.registerEvent(this.$topbar, "mousedown", this.moveStart.bind(this));
     this.registerEvent(this.$canvas, "mousedown", this.moveStart.bind(this));
     this.registerEvent(document, "mouseup", () => this.moveStop());
@@ -1698,6 +1723,52 @@ class BotImage extends Base2 {
     if ($resize.classList.contains("w")) {
       this.moveInfo.width = this.pixels.width;
       this.moveInfo.globalX = this.position.globalX;
+    }
+  }
+  selectionResizeStart(event) {
+    if (!this.selection || event.button !== 0)
+      return;
+    event.preventDefault();
+    event.stopPropagation();
+    const $handle = event.currentTarget;
+    this.selectionResizeInfo = {
+      dir: $handle.classList[1],
+      clientX: event.clientX,
+      clientY: event.clientY,
+      selection: { ...this.selection }
+    };
+  }
+  selectionResize(event) {
+    if (!this.selectionResizeInfo)
+      return;
+    const { dir, clientX, clientY, selection } = this.selectionResizeInfo;
+    const pixelSize = this.position.pixelSize;
+    const deltaX = Math.round((event.clientX - clientX) / pixelSize);
+    const deltaY = Math.round((event.clientY - clientY) / pixelSize);
+    const imgW = this.pixels.pixels[0].length;
+    const imgH = this.pixels.pixels.length;
+    let { x, y, width, height } = selection;
+    if (dir.includes("e"))
+      width = Math.min(imgW - selection.x, Math.max(1, selection.width + deltaX));
+    if (dir.includes("s"))
+      height = Math.min(imgH - selection.y, Math.max(1, selection.height + deltaY));
+    if (dir.includes("w")) {
+      const newX = Math.min(selection.x + selection.width - 1, Math.max(0, selection.x + deltaX));
+      width = selection.x + selection.width - newX;
+      x = newX;
+    }
+    if (dir.includes("n")) {
+      const newY = Math.min(selection.y + selection.height - 1, Math.max(0, selection.y + deltaY));
+      height = selection.y + selection.height - newY;
+      y = newY;
+    }
+    this.selection = { x, y, width, height };
+    this.update();
+  }
+  selectionResizeStop() {
+    if (this.selectionResizeInfo) {
+      this.selectionResizeInfo = undefined;
+      save(this.bot);
     }
   }
   export() {
@@ -2286,6 +2357,44 @@ var style_default = `/* stylelint-disable declaration-no-important */
 	z-index: 2;
 }
 
+/* Selection resize handles */
+.selection-resize {
+	position: absolute;
+	pointer-events: auto;
+}
+
+.selection-resize.n {
+	top: calc(var(--resize) / -2);
+	left: 0;
+	width: 100%;
+	height: var(--resize);
+	cursor: n-resize;
+}
+
+.selection-resize.e {
+	top: 0;
+	right: calc(var(--resize) / -2);
+	width: var(--resize);
+	height: 100%;
+	cursor: e-resize;
+}
+
+.selection-resize.s {
+	bottom: calc(var(--resize) / -2);
+	left: 0;
+	width: 100%;
+	height: var(--resize);
+	cursor: s-resize;
+}
+
+.selection-resize.w {
+	top: 0;
+	left: calc(var(--resize) / -2);
+	width: var(--resize);
+	height: 100%;
+	cursor: w-resize;
+}
+
 /* Resize */
 .resize {
 	position: absolute;
@@ -2548,21 +2657,6 @@ var style_default = `/* stylelint-disable declaration-no-important */
 	margin: 0;
 }
 `;
-
-// src/errors.ts
-class WPlaceBotError extends Error {
-  name = "WPlaceBotError";
-  constructor(message, bot) {
-    super(message);
-    bot.widget.status = message;
-  }
-}
-class NoImageError extends WPlaceBotError {
-  name = "NoImageError";
-  constructor(bot) {
-    super("❌ No image is selected", bot);
-  }
-}
 
 // src/widget.html
 var widget_default = `<button class="wopen-button"><div>></div></button>
@@ -2850,6 +2944,18 @@ function yieldToBrowser() {
     yieldChannel.port2.postMessage(undefined);
   });
 }
+async function waitFor(get, timeout = 3000) {
+  const deadline = Date.now() + timeout;
+  for (;; ) {
+    const value = get();
+    if (value)
+      return value;
+    if (Date.now() >= deadline)
+      return;
+    await wait(25);
+  }
+}
+var PAINT_ICON_PATH = "M240-120q-45 0-89-22t-71-58";
 var SAVE_VERSION = 2;
 
 class WPlaceBot {
@@ -2971,10 +3077,12 @@ class WPlaceBot {
       });
       const data = await res.json();
       let charges = Math.floor(data.charges.count);
-      const images = this.images.filter((i) => i.active);
+      let images = this.images.filter((i) => i.active);
+      if (images.some((i) => i.selection))
+        images = images.filter((i) => i.selection);
       let n = 0;
-      for (let index = 0;index < this.images.length; index++)
-        n += this.images[index].tasks.length;
+      for (let index = 0;index < images.length; index++)
+        n += images[index].tasks.length;
       switch (this.strategy) {
         case "ALL" /* ALL */: {
           while (charges > 0) {
@@ -2983,10 +3091,11 @@ class WPlaceBot {
               const task = images[imageIndex].tasks.shift();
               if (!task)
                 continue;
-              this.drawTask(task);
+              end = false;
+              if (!this.drawTask(task))
+                continue;
               charges -= 1;
               await this.tick();
-              end = false;
             }
             if (end)
               break;
@@ -3005,7 +3114,8 @@ class WPlaceBot {
                 minImage = image;
               }
             }
-            this.drawTask(minImage.tasks.shift());
+            if (!this.drawTask(minImage.tasks.shift()))
+              continue;
             charges -= 1;
             await this.tick();
           }
@@ -3015,7 +3125,8 @@ class WPlaceBot {
           for (let imageIndex = 0;imageIndex < images.length; imageIndex++) {
             const image = images[imageIndex];
             for (let task = image.tasks.shift();task && charges > 0; task = image.tasks.shift()) {
-              this.drawTask(task);
+              if (!this.drawTask(task))
+                continue;
               charges -= 1;
               await this.tick();
             }
@@ -3053,7 +3164,7 @@ class WPlaceBot {
   async updateColors() {
     await this.openColors();
     this.unavailableColors.clear();
-    for (const $button of document.querySelectorAll("button.btn.relative.w-full"))
+    for (const $button of document.querySelectorAll('button[id^="color-"]'))
       if ($button.children.length !== 0)
         this.unavailableColors.add(Math.abs(Number.parseInt($button.id.slice(6))));
     this.updateImageColors();
@@ -3193,13 +3304,30 @@ class WPlaceBot {
       pixelSize: (extractScreenPositionFromStar(this.$stars[minI2]).x - anchorScreenPosition.x) / (FAVORITE_LOCATIONS_POSITIONS[minI2].x - anchorWorldPosition.x)
     };
   }
+  get paletteOpen() {
+    return !!document.querySelector('button[id^="color-"]');
+  }
+  clickPaint() {
+    for (const $button of document.querySelectorAll("button.btn-primary")) {
+      if ($button.offsetParent !== null && $button.innerHTML.includes(PAINT_ICON_PATH)) {
+        $button.click();
+        return true;
+      }
+    }
+    return false;
+  }
   async openColors() {
     this.lastColor = undefined;
     this.colorButtons.clear();
-    document.querySelector(".flex.gap-2.px-3 > .btn-circle")?.click();
-    await wait(1);
-    document.querySelector(".btn.btn-primary.btn-lg.relative.z-30")?.click();
-    await wait(1);
+    if (!this.paletteOpen) {
+      this.clickPaint();
+      if (!await waitFor(() => this.paletteOpen, 2000)) {
+        await this.closeAll();
+        this.clickPaint();
+        if (!await waitFor(() => this.paletteOpen, 2000))
+          throw new WPlaceBotError("❌ Could not open the color palette", this);
+      }
+    }
     const unfoldColors = document.querySelector("button.bottom-0");
     if (unfoldColors?.innerHTML === '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" fill="currentColor" class="size-5"><path d="M480-120 300-300l58-58 122 122 122-122 58 58-180 180ZM358-598l-58-58 180-180 180 180-58 58-122-122-122 122Z"></path></svg><!---->') {
       unfoldColors.click();
@@ -3210,7 +3338,15 @@ class WPlaceBot {
     if (this.lastColor !== task.color) {
       let $color = this.colorButtons.get(task.color);
       if (!$color?.isConnected) {
-        $color = document.getElementById("color-" + task.color);
+        const $found = document.getElementById("color-" + task.color);
+        if (!$found) {
+          if (!this.paletteOpen)
+            throw new WPlaceBotError("❌ Color palette closed while drawing", this);
+          this.unavailableColors.add(task.color);
+          this.widget.status = `⚠️ Skipping unavailable color ${COLOR_NAMES[task.color] ?? task.color}`;
+          return false;
+        }
+        $color = $found;
         this.colorButtons.set(task.color, $color);
       }
       $color.click();
@@ -3240,6 +3376,7 @@ class WPlaceBot {
       bubbles: true,
       cancelable: true
     }));
+    return true;
   }
   registerFetchInterceptor() {
     const originalFetch = globalThis.fetch;

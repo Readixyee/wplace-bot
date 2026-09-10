@@ -1,5 +1,7 @@
 import { wait } from '@softsky/utils';
 
+import { COLOR_NAMES } from './colors';
+import { WPlaceBotError } from './errors';
 import { BotImage, DrawTask } from './image';
 import { Pixels } from './pixels';
 import { RegionGrid } from './regions';
@@ -31,6 +33,24 @@ function yieldToBrowser() {
 		yieldChannel.port2.postMessage(undefined);
 	});
 }
+
+/**
+ * Poll until `get` returns something truthy, or give up after `timeout` ms.
+ * wplace renders with Svelte, so a button we just caused to appear is not in
+ * the DOM on the next tick — fixed sleeps are a coin flip, this isn't.
+ */
+async function waitFor<T>(get: () => T | null | undefined, timeout = 3000): Promise<T | undefined> {
+	const deadline = Date.now() + timeout;
+	for (;;) {
+		const value = get();
+		if (value) return value;
+		if (Date.now() >= deadline) return undefined;
+		await wait(25);
+	}
+}
+
+/** Leading edge of wplace's brush icon path, shared by every "Paint" button */
+const PAINT_ICON_PATH = 'M240-120q-45 0-89-22t-71-58';
 
 export type Me = {
 	allianceId: number;
@@ -256,10 +276,13 @@ export class WPlaceBot {
 
 				let charges = Math.floor(data.charges.count);
 
-				const images = this.images.filter((i) => i.active);
+				let images = this.images.filter((i) => i.active);
+				// A marked area means "only draw this" — stop once it's done instead of
+				// spilling over into other images that never asked to be restricted.
+				if (images.some((i) => i.selection)) images = images.filter((i) => i.selection);
 
 				let n = 0;
-				for (let index = 0; index < this.images.length; index++) n += this.images[index]!.tasks.length;
+				for (let index = 0; index < images.length; index++) n += images[index]!.tasks.length;
 				switch (this.strategy) {
 					case BotStrategy.ALL: {
 						while (charges > 0) {
@@ -267,10 +290,10 @@ export class WPlaceBot {
 							for (let imageIndex = 0; imageIndex < images.length; imageIndex++) {
 								const task = images[imageIndex]!.tasks.shift();
 								if (!task) continue;
-								this.drawTask(task);
+								end = false;
+								if (!this.drawTask(task)) continue;
 								charges -= 1;
 								await this.tick();
-								end = false;
 							}
 							if (end) break;
 						}
@@ -290,7 +313,7 @@ export class WPlaceBot {
 									minImage = image;
 								}
 							}
-							this.drawTask(minImage.tasks.shift()!);
+							if (!this.drawTask(minImage.tasks.shift()!)) continue;
 							charges -= 1;
 							await this.tick();
 						}
@@ -300,7 +323,7 @@ export class WPlaceBot {
 						for (let imageIndex = 0; imageIndex < images.length; imageIndex++) {
 							const image = images[imageIndex]!;
 							for (let task = image.tasks.shift(); task && charges > 0; task = image.tasks.shift()) {
-								this.drawTask(task);
+								if (!this.drawTask(task)) continue;
 								charges -= 1;
 								await this.tick();
 							}
@@ -350,7 +373,8 @@ export class WPlaceBot {
 	public async updateColors() {
 		await this.openColors();
 		this.unavailableColors.clear();
-		for (const $button of document.querySelectorAll<HTMLButtonElement>('button.btn.relative.w-full'))
+		// Key off the id we actually click later, not off layout classes
+		for (const $button of document.querySelectorAll<HTMLButtonElement>('button[id^="color-"]'))
 			if ($button.children.length !== 0)
 				this.unavailableColors.add(Math.abs(Number.parseInt($button.id.slice(6))));
 		this.updateImageColors();
@@ -529,16 +553,45 @@ export class WPlaceBot {
 		};
 	}
 
+	/** True while the color palette is mounted */
+	protected get paletteOpen() {
+		return !!document.querySelector('button[id^="color-"]');
+	}
+
+	/**
+	 * Click whichever "Paint" button is on screen right now.
+	 * The map's own button is `.btn-lg.relative.z-30`, but the pixel-info and
+	 * profile popups cover it with their own smaller copy, so match on the brush
+	 * icon's path instead of on layout classes.
+	 */
+	protected clickPaint() {
+		for (const $button of document.querySelectorAll<HTMLButtonElement>('button.btn-primary')) {
+			// offsetParent skips the hidden one of each md/max-md button pair
+			if ($button.offsetParent !== null && $button.innerHTML.includes(PAINT_ICON_PATH)) {
+				$button.click();
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/** Opens colors and makes them visible for selection */
 	protected async openColors() {
 		this.lastColor = undefined;
 		this.colorButtons.clear();
-		// Click close marker
-		document.querySelector<HTMLButtonElement>('.flex.gap-2.px-3 > .btn-circle')?.click();
-		await wait(1);
-		// Click "Paint"
-		document.querySelector<HTMLButtonElement>('.btn.btn-primary.btn-lg.relative.z-30')?.click();
-		await wait(1);
+		if (!this.paletteOpen) {
+			this.clickPaint();
+			// Svelte mounts the palette asynchronously, so poll for it rather than
+			// hoping a fixed sleep was long enough.
+			if (!(await waitFor(() => this.paletteOpen, 2000))) {
+				// Whatever is open has no Paint button we recognize and hides the
+				// map's own — drop the popups and go again.
+				await this.closeAll();
+				this.clickPaint();
+				if (!(await waitFor(() => this.paletteOpen, 2000)))
+					throw new WPlaceBotError('❌ Could not open the color palette', this);
+			}
+		}
 		// Click Unfold colors if folded
 		const unfoldColors = document.querySelector<HTMLButtonElement>('button.bottom-0');
 		if (
@@ -550,14 +603,26 @@ export class WPlaceBot {
 		}
 	}
 
-	/** Draw one task */
+	/** Draw one task. Returns false when the pixel had to be skipped. */
 	protected drawTask(task: DrawTask) {
 		if (this.lastColor !== task.color) {
 			// Re-query if the button was never seen or wplace re-rendered it away —
 			// clicking a detached node would silently paint the wrong color.
 			let $color = this.colorButtons.get(task.color);
 			if (!$color?.isConnected) {
-				$color = document.getElementById('color-' + task.color) as HTMLButtonElement;
+				const $found = document.getElementById('color-' + task.color) as HTMLButtonElement | null;
+				if (!$found) {
+					// Palette gone entirely (paint mode closed under us) — no point
+					// grinding through the remaining tasks.
+					if (!this.paletteOpen)
+						throw new WPlaceBotError('❌ Color palette closed while drawing', this);
+					// Palette is there but this color isn't in it: treat it as one we
+					// don't own so the rest of the image still gets drawn.
+					this.unavailableColors.add(task.color);
+					this.widget.status = `⚠️ Skipping unavailable color ${COLOR_NAMES[task.color] ?? task.color}`;
+					return false;
+				}
+				$color = $found;
 				this.colorButtons.set(task.color, $color);
 			}
 			$color.click();
@@ -593,6 +658,7 @@ export class WPlaceBot {
 				cancelable: true,
 			})
 		);
+			return true;
 	}
 
 	/** Start listening to fetch requests */

@@ -108,14 +108,25 @@ export class Widget extends Base {
 		return this.run(
 			'Adding image',
 			async () => {
-				await this.bot.updateColors();
+				// Open the picker before any await: browsers only allow it while the
+				// click's transient user activation is still alive.
 				const input = document.createElement('input');
 				input.type = 'file';
 				input.accept = 'image/*,.wbot';
-				input.click();
-				await promisifyEventSource(input, ['change'], ['cancel', 'error']);
-				const file = input.files?.[0];
+				input.hidden = true;
+				document.body.append(input);
+				let file: File | undefined;
+				try {
+					const picked = promisifyEventSource(input, ['change'], ['cancel', 'error']);
+					input.click();
+					await picked;
+					file = input.files?.[0];
+				} finally {
+					input.remove();
+				}
 				if (!file) throw new NoImageError(this.bot);
+				await this.bot.updateColors();
+				this.bot.updateStars();
 				let botImage;
 				if (file.name.endsWith('.wbot')) {
 					botImage = await BotImage.fromJSON(
@@ -124,8 +135,9 @@ export class Widget extends Base {
 					);
 				} else {
 					const reader = new FileReader();
+					const loaded = promisifyEventSource(reader, ['load'], ['error']);
 					reader.readAsDataURL(file);
-					await promisifyEventSource(reader, ['load'], ['error']);
+					await loaded;
 					const image = new Image();
 					image.src = reader.result as string;
 					await promisifyEventSource(image, ['load'], ['error']);

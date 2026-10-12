@@ -10,6 +10,10 @@ export const WORLD_TILES = 2048;
 export const WORLD_PIXEL_SIZE = WORLD_TILE_SIZE * WORLD_TILES;
 
 // === Favoriote Locations ===
+/** Name given to every injected favorite. wplace puts it in the marker's aria-label */
+export const FAVORITE_NAME = 'WBOT_FAVORITE';
+/** Our own favorite markers. Keyed off the aria-label we control, not Tailwind classes */
+export const STAR_SELECTOR = `.maplibregl-marker[aria-label="${FAVORITE_NAME}"]`;
 export const FAVORITE_LOCATIONS_POSITIONS: Position[] = [];
 export const FAVORITE_LOCATIONS: Me['favoriteLocations'] = [];
 let lastId = Date.now();
@@ -22,7 +26,7 @@ export function addFavoriteLocation(position: Position) {
 				180) /
 			Math.PI,
 		longitude: (((position.x / WORLD_PIXEL_SIZE) * (2 * Math.PI) - Math.PI) * 180) / Math.PI,
-		name: 'WBOT_FAVORITE',
+		name: FAVORITE_NAME,
 	});
 }
 
@@ -46,12 +50,14 @@ addFavoriteLocation({
 //   }
 // }
 
-export function extractScreenPositionFromStar($star: HTMLDivElement) {
-	const [x, y] = $star.style.transform
-		.slice(32, -31)
-		.split(', ')
-		.map((x) => Number.parseFloat(x)) as [number, number];
-	return { x, y };
+/** Matches maplibre's `translate(123.4px, -56px)`; the leading `translate(-50%, -50%)` has no px */
+const TRANSLATE_PX_REGEXP = /translate\(\s*(-?[\d.e+-]+)px\s*,\s*(-?[\d.e+-]+)px\s*\)/;
+
+export function extractScreenPositionFromStar($star: HTMLDivElement | undefined): Position {
+	if (!$star) throw new Error('Favorite anchor marker is missing — wplace did not render the injected favorites');
+	const match = TRANSLATE_PX_REGEXP.exec($star.style.transform);
+	if (!match) throw new Error(`Unsupported favorite marker transform: "${$star.style.transform}"`);
+	return { x: Number.parseFloat(match[1]!), y: Number.parseFloat(match[2]!) };
 }
 
 export class WorldPosition {

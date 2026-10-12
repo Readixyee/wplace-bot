@@ -21,9 +21,7 @@
 	--text-b: 44;
 }
 
-.text-yellow-400.cursor-pointer.z-10.maplibregl-marker.maplibregl-marker-anchor-center:nth-child(
-		-n + FAKE_FAVORITE_LOCATIONS
-	) {
+.maplibregl-marker[aria-label='WBOT_FAVORITE'] {
 	display: none;
 }
 

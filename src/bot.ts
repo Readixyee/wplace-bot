@@ -15,6 +15,7 @@ import {
 	FAVORITE_LOCATIONS,
 	FAVORITE_LOCATIONS_POSITIONS,
 	Position,
+	STAR_SELECTOR,
 	WorldPosition,
 } from './world-position';
 
@@ -170,16 +171,13 @@ export class WPlaceBot {
 		}
 
 		const style = document.createElement('style');
-		style.textContent = (css as string).replace('FAKE_FAVORITE_LOCATIONS', FAVORITE_LOCATIONS.length.toString());
+		style.textContent = css as string;
 		document.head.append(style);
 
 		void this.widget.run('Initializing', async () => {
 			await this.waitForElement('login', '.avatar.center-absolute.absolute');
-			await this.waitForElement('pixel count', '.btn.btn-primary.btn-lg.relative.z-30 canvas');
-			await this.waitForElement(
-				'favorite stars',
-				'.text-yellow-400.cursor-pointer.z-10.maplibregl-marker.maplibregl-marker-anchor-center'
-			);
+			await this.waitForElement('paint button', '.btn.btn-primary.btn-lg.relative.z-30');
+			await this.waitForElement('favorite stars', STAR_SELECTOR);
 
 			const $canvasContainer = await this.waitForElement('canvas', '.maplibregl-canvas-container');
 
@@ -359,8 +357,8 @@ export class WPlaceBot {
 	 * it for the span of one tick is free speed.
 	 */
 	public readStarPosition(index: number): Position {
-		if (!this.starCache) return extractScreenPositionFromStar(this.$stars[index]!);
-		return (this.starCache[index] ??= extractScreenPositionFromStar(this.$stars[index]!));
+		if (!this.starCache) return extractScreenPositionFromStar(this.$stars[index]);
+		return (this.starCache[index] ??= extractScreenPositionFromStar(this.$stars[index]));
 	}
 
 	/** Hand control back to the page between pixels */
@@ -527,7 +525,7 @@ export class WPlaceBot {
 		let min1 = Infinity;
 		let min2 = Infinity;
 		for (let index = 0; index < this.$stars.length; index++) {
-			const { x, y } = extractScreenPositionFromStar(this.$stars[index]!);
+			const { x, y } = extractScreenPositionFromStar(this.$stars[index]);
 			if (x < position.x && y < position.y) {
 				const delta = position.x - x + (position.y - y);
 				if (delta < min1) {
@@ -542,13 +540,13 @@ export class WPlaceBot {
 				}
 			}
 		}
-		const anchorScreenPosition = extractScreenPositionFromStar(this.$stars[anchorIndex]!);
+		const anchorScreenPosition = extractScreenPositionFromStar(this.$stars[anchorIndex]);
 		const anchorWorldPosition = FAVORITE_LOCATIONS_POSITIONS[anchorIndex]!;
 		return {
 			anchorScreenPosition,
 			anchorWorldPosition,
 			pixelSize:
-				(extractScreenPositionFromStar(this.$stars[minI2]!).x - anchorScreenPosition.x) /
+				(extractScreenPositionFromStar(this.$stars[minI2]).x - anchorScreenPosition.x) /
 				(FAVORITE_LOCATIONS_POSITIONS[minI2]!.x - anchorWorldPosition.x),
 		};
 	}
@@ -572,7 +570,41 @@ export class WPlaceBot {
 				return true;
 			}
 		}
+		// Brush icon changed? Fall back to the map's own Paint button
+		const $main = document.querySelector<HTMLButtonElement>('.btn.btn-primary.btn-lg.relative.z-30');
+		if ($main && $main.offsetParent !== null) {
+			$main.click();
+			return true;
+		}
 		return false;
+	}
+
+	/** Unfold the color palette if wplace shows it collapsed. Returns true if clicked */
+	protected unfoldColors() {
+		const $unfold = document.querySelector<HTMLButtonElement>('button.bottom-0');
+		if (
+			$unfold?.innerHTML ===
+			'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" fill="currentColor" class="size-5"><path d="M480-120 300-300l58-58 122 122 122-122 58 58-180 180ZM358-598l-58-58 180-180 180 180-58 58-122-122-122 122Z"></path></svg><!---->'
+		) {
+			$unfold.click();
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Click Paint and wait for the color buttons. A folded palette doesn't render
+	 * its `color-N` buttons, so keep unfolding while we wait (same order as upstream).
+	 */
+	protected async tryOpenColors(timeout: number) {
+		// Close the marker / pixel popup that covers the map's Paint button
+		document.querySelector<HTMLButtonElement>('.flex.gap-2.px-3 > .btn-circle')?.click();
+		await wait(1);
+		this.clickPaint();
+		return !!(await waitFor(() => {
+			this.unfoldColors();
+			return this.paletteOpen;
+		}, timeout));
 	}
 
 	/** Opens colors and makes them visible for selection */
@@ -580,27 +612,17 @@ export class WPlaceBot {
 		this.lastColor = undefined;
 		this.colorButtons.clear();
 		if (!this.paletteOpen) {
-			this.clickPaint();
 			// Svelte mounts the palette asynchronously, so poll for it rather than
 			// hoping a fixed sleep was long enough.
-			if (!(await waitFor(() => this.paletteOpen, 2000))) {
-				// Whatever is open has no Paint button we recognize and hides the
-				// map's own — drop the popups and go again.
+			if (!(await this.tryOpenColors(3000))) {
+				// Whatever is open hides the Paint button — drop the popups and go again.
 				await this.closeAll();
-				this.clickPaint();
-				if (!(await waitFor(() => this.paletteOpen, 2000)))
+				if (!(await this.tryOpenColors(3000))) {
 					throw new WPlaceBotError('❌ Could not open the color palette', this);
+				}
 			}
 		}
-		// Click Unfold colors if folded
-		const unfoldColors = document.querySelector<HTMLButtonElement>('button.bottom-0');
-		if (
-			unfoldColors?.innerHTML ===
-			'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" fill="currentColor" class="size-5"><path d="M480-120 300-300l58-58 122 122 122-122 58 58-180 180ZM358-598l-58-58 180-180 180 180-58 58-122-122-122 122Z"></path></svg><!---->'
-		) {
-			unfoldColors.click();
-			await wait(1);
-		}
+		if (this.unfoldColors()) await wait(1);
 	}
 
 	/** Draw one task. Returns false when the pixel had to be skipped. */
@@ -673,10 +695,11 @@ export class WPlaceBot {
 			if (typeof request == 'string') url = request;
 			else if (request instanceof Request) url = request.url;
 			else if (request instanceof URL) url = request.href;
-			if (response.url === 'https://backend.wplace.live/me') {
-				this.me = (await cloned.json()) as Me;
-				this.me.favoriteLocations.unshift(...FAVORITE_LOCATIONS);
-				this.me.maxFavoriteLocations = Infinity;
+			if (WPlaceBot.isMeUrl(response.url || url)) {
+				const me = (await cloned.json()) as Me;
+				me.favoriteLocations = [...FAVORITE_LOCATIONS, ...(me.favoriteLocations ?? [])];
+				me.maxFavoriteLocations = Infinity;
+				this.me = me;
 				response.json = () => Promise.resolve(this.me);
 			}
 			const pixelMatch = pixelRegExp.exec(url);
@@ -690,6 +713,16 @@ export class WPlaceBot {
 				}
 			return response;
 		};
+	}
+
+	/** Matches /me on the backend regardless of query string or trailing slash */
+	protected static isMeUrl(url: string) {
+		try {
+			const parsed = new URL(url, location.href);
+			return parsed.hostname === 'backend.wplace.live' && /^\/me\/?$/.test(parsed.pathname);
+		} catch {
+			return false;
+		}
 	}
 
 	/** Closes all popups */
@@ -733,12 +766,8 @@ export class WPlaceBot {
 	}
 
 	/** Simply update $stars property */
-	protected updateStars() {
-		this.$stars = [
-			...document.querySelectorAll<HTMLDivElement>(
-				'.text-yellow-400.cursor-pointer.z-10.maplibregl-marker.maplibregl-marker-anchor-center'
-			),
-		].slice(0, FAVORITE_LOCATIONS.length);
+	public updateStars() {
+		this.$stars = [...document.querySelectorAll<HTMLDivElement>(STAR_SELECTOR)].slice(0, FAVORITE_LOCATIONS.length);
 	}
 
 	/** Update images position and contents */

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         wplace-bot fixed
 // @namespace    https://github.com/Readixyee
-// @version      1.8.1
+// @version      1.8.2
 // @description  Bot to automate painting on website https://wplace.live
 // @author       Readixyee, SoundOfTheSky
 // @license      MPL-2.0
@@ -832,6 +832,8 @@ async function loadSave() {
 var WORLD_TILE_SIZE = 1000;
 var WORLD_TILES = 2048;
 var WORLD_PIXEL_SIZE = WORLD_TILE_SIZE * WORLD_TILES;
+var FAVORITE_NAME = "WBOT_FAVORITE";
+var STAR_SELECTOR = `.maplibregl-marker[aria-label="${FAVORITE_NAME}"]`;
 var FAVORITE_LOCATIONS_POSITIONS = [];
 var FAVORITE_LOCATIONS = [];
 var lastId = Date.now();
@@ -841,7 +843,7 @@ function addFavoriteLocation(position) {
     id: lastId++,
     latitude: (2 * Math.atan(Math.exp(-(position.y / WORLD_PIXEL_SIZE * (2 * Math.PI) - Math.PI))) - Math.PI / 2) * 180 / Math.PI,
     longitude: (position.x / WORLD_PIXEL_SIZE * (2 * Math.PI) - Math.PI) * 180 / Math.PI,
-    name: "WBOT_FAVORITE"
+    name: FAVORITE_NAME
   });
 }
 addFavoriteLocation({
@@ -852,9 +854,14 @@ addFavoriteLocation({
   x: WORLD_PIXEL_SIZE / 3 * 2 | 0,
   y: WORLD_PIXEL_SIZE / 3 * 2 | 0
 });
+var TRANSLATE_PX_REGEXP = /translate\(\s*(-?[\d.e+-]+)px\s*,\s*(-?[\d.e+-]+)px\s*\)/;
 function extractScreenPositionFromStar($star) {
-  const [x, y] = $star.style.transform.slice(32, -31).split(", ").map((x2) => Number.parseFloat(x2));
-  return { x, y };
+  if (!$star)
+    throw new Error("Favorite anchor marker is missing — wplace did not render the injected favorites");
+  const match = TRANSLATE_PX_REGEXP.exec($star.style.transform);
+  if (!match)
+    throw new Error(`Unsupported favorite marker transform: "${$star.style.transform}"`);
+  return { x: Number.parseFloat(match[1]), y: Number.parseFloat(match[2]) };
 }
 
 class WorldPosition {
@@ -2028,9 +2035,7 @@ var style_default = `/* stylelint-disable declaration-no-important */
 	--text-b: 44;
 }
 
-.text-yellow-400.cursor-pointer.z-10.maplibregl-marker.maplibregl-marker-anchor-center:nth-child(
-		-n + FAKE_FAVORITE_LOCATIONS
-	) {
+.maplibregl-marker[aria-label='WBOT_FAVORITE'] {
 	display: none;
 }
 
@@ -2766,22 +2771,32 @@ class Widget extends Base2 {
   addImage() {
     this.setDisabled("add-image", true);
     return this.run("Adding image", async () => {
-      await this.bot.updateColors();
       const input = document.createElement("input");
       input.type = "file";
       input.accept = "image/*,.wbot";
-      input.click();
-      await promisifyEventSource(input, ["change"], ["cancel", "error"]);
-      const file = input.files?.[0];
+      input.hidden = true;
+      document.body.append(input);
+      let file;
+      try {
+        const picked = promisifyEventSource(input, ["change"], ["cancel", "error"]);
+        input.click();
+        await picked;
+        file = input.files?.[0];
+      } finally {
+        input.remove();
+      }
       if (!file)
         throw new NoImageError(this.bot);
+      await this.bot.updateColors();
+      this.bot.updateStars();
       let botImage;
       if (file.name.endsWith(".wbot")) {
         botImage = await BotImage.fromJSON(this.bot, JSON.parse(await file.text()));
       } else {
         const reader = new FileReader;
+        const loaded = promisifyEventSource(reader, ["load"], ["error"]);
         reader.readAsDataURL(file);
-        await promisifyEventSource(reader, ["load"], ["error"]);
+        await loaded;
         const image = new Image;
         image.src = reader.result;
         await promisifyEventSource(image, ["load"], ["error"]);
@@ -2998,12 +3013,12 @@ class WPlaceBot {
       this.showRegions = save2.showRegions ?? false;
     }
     const style = document.createElement("style");
-    style.textContent = style_default.replace("FAKE_FAVORITE_LOCATIONS", FAVORITE_LOCATIONS.length.toString());
+    style.textContent = style_default;
     document.head.append(style);
     this.widget.run("Initializing", async () => {
       await this.waitForElement("login", ".avatar.center-absolute.absolute");
-      await this.waitForElement("pixel count", ".btn.btn-primary.btn-lg.relative.z-30 canvas");
-      await this.waitForElement("favorite stars", ".text-yellow-400.cursor-pointer.z-10.maplibregl-marker.maplibregl-marker-anchor-center");
+      await this.waitForElement("paint button", ".btn.btn-primary.btn-lg.relative.z-30");
+      await this.waitForElement("favorite stars", STAR_SELECTOR);
       const $canvasContainer = await this.waitForElement("canvas", ".maplibregl-canvas-container");
       new MutationObserver((mutations) => {
         for (let index = 0;index < mutations.length; index++)
@@ -3314,25 +3329,43 @@ class WPlaceBot {
         return true;
       }
     }
+    const $main = document.querySelector(".btn.btn-primary.btn-lg.relative.z-30");
+    if ($main && $main.offsetParent !== null) {
+      $main.click();
+      return true;
+    }
     return false;
+  }
+  unfoldColors() {
+    const $unfold = document.querySelector("button.bottom-0");
+    if ($unfold?.innerHTML === '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" fill="currentColor" class="size-5"><path d="M480-120 300-300l58-58 122 122 122-122 58 58-180 180ZM358-598l-58-58 180-180 180 180-58 58-122-122-122 122Z"></path></svg><!---->') {
+      $unfold.click();
+      return true;
+    }
+    return false;
+  }
+  async tryOpenColors(timeout) {
+    document.querySelector(".flex.gap-2.px-3 > .btn-circle")?.click();
+    await wait(1);
+    this.clickPaint();
+    return !!await waitFor(() => {
+      this.unfoldColors();
+      return this.paletteOpen;
+    }, timeout);
   }
   async openColors() {
     this.lastColor = undefined;
     this.colorButtons.clear();
     if (!this.paletteOpen) {
-      this.clickPaint();
-      if (!await waitFor(() => this.paletteOpen, 2000)) {
+      if (!await this.tryOpenColors(3000)) {
         await this.closeAll();
-        this.clickPaint();
-        if (!await waitFor(() => this.paletteOpen, 2000))
+        if (!await this.tryOpenColors(3000)) {
           throw new WPlaceBotError("❌ Could not open the color palette", this);
+        }
       }
     }
-    const unfoldColors = document.querySelector("button.bottom-0");
-    if (unfoldColors?.innerHTML === '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" fill="currentColor" class="size-5"><path d="M480-120 300-300l58-58 122 122 122-122 58 58-180 180ZM358-598l-58-58 180-180 180 180-58 58-122-122-122 122Z"></path></svg><!---->') {
-      unfoldColors.click();
+    if (this.unfoldColors())
       await wait(1);
-    }
   }
   drawTask(task) {
     if (this.lastColor !== task.color) {
@@ -3391,10 +3424,11 @@ class WPlaceBot {
         url = request.url;
       else if (request instanceof URL)
         url = request.href;
-      if (response.url === "https://backend.wplace.live/me") {
-        this.me = await cloned.json();
-        this.me.favoriteLocations.unshift(...FAVORITE_LOCATIONS);
-        this.me.maxFavoriteLocations = Infinity;
+      if (WPlaceBot.isMeUrl(response.url || url)) {
+        const me = await cloned.json();
+        me.favoriteLocations = [...FAVORITE_LOCATIONS, ...me.favoriteLocations ?? []];
+        me.maxFavoriteLocations = Infinity;
+        this.me = me;
         response.json = () => Promise.resolve(this.me);
       }
       const pixelMatch = pixelRegExp.exec(url);
@@ -3405,6 +3439,14 @@ class WPlaceBot {
       }
       return response;
     };
+  }
+  static isMeUrl(url) {
+    try {
+      const parsed = new URL(url, location.href);
+      return parsed.hostname === "backend.wplace.live" && /^\/me\/?$/.test(parsed.pathname);
+    } catch {
+      return false;
+    }
   }
   async closeAll() {
     for (const button of document.querySelectorAll("button")) {
@@ -3437,9 +3479,7 @@ class WPlaceBot {
     });
   }
   updateStars() {
-    this.$stars = [
-      ...document.querySelectorAll(".text-yellow-400.cursor-pointer.z-10.maplibregl-marker.maplibregl-marker-anchor-center")
-    ].slice(0, FAVORITE_LOCATIONS.length);
+    this.$stars = [...document.querySelectorAll(STAR_SELECTOR)].slice(0, FAVORITE_LOCATIONS.length);
   }
   updateImages() {
     for (let index = 0;index < this.images.length; index++)
